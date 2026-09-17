@@ -1,5 +1,7 @@
 chromadb==0.5.5
 sentence-transformers==3.0.1
+faster-whisper==1.0.3
+scipy==1.14.0
 
 # torch is deliberately NOT pinned: Colab ships a build matched to its CUDA
 # runtime, and forcing a specific version either takes ten minutes to install
