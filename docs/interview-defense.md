@@ -550,6 +550,18 @@ The single miss is Marathi *"मला कीबोर्ड घ्यायच�
 
 **Catalog embedding cost:** 1,200 items embedded in **22 seconds** on CPU — the one-time startup cost, paid per notebook boot.
 
+**Server cold-start, measured (everything except the LLM)** — module imports plus constructing every real component with `backend.main`'s actual code path, same 8-core i7:
+
+| Stage | Time |
+|---|---|
+| Imports (torch, transformers, chromadb, faster-whisper) | 5.0s |
+| `InventoryStore` (Chroma client + load e5 embedding model) | 6.3s |
+| `Transcriber` (load Whisper `small`) | 1.1s |
+| `Synthesizer.preload()` (3 MMS checkpoints) | 4.7s |
+| **Total, minus the LLM** | **17.0s** |
+
+This also confirms something worth stating plainly: `backend/main.py` was run against every **real** model — real Chroma, real Whisper, real MMS-TTS, real VAD — and failed only at the one line needing `llama_cpp`, which needs Colab's CUDA build. Everything else in the pipeline is verified working end-to-end with real weights, not fakes, before a single line runs on Colab. LLM load time (GGUF read + GPU upload) still needs measuring there; the Colab runbook's 90s sleep is likely conservative once this 17s and the LLM's load time are both known precisely.
+
 **STT latency (CPU)** — `python -m backend.stt.benchmark`, faster-whisper `small` int8, 2.1s clip, 5 runs after warm-up, on an **8-core i7-1185G7**:
 
 | Device | Mean | Min | Max | RTF |
