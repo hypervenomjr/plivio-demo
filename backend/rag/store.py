@@ -1,12 +1,25 @@
+import logging
+
 import chromadb
+from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
 EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-small"
 
+# chromadb 0.5.x logs a posthog signature error on every telemetry call even
+# when telemetry is disabled in Settings. It is harmless, but it prints on
+# every startup and query, which would clutter a live demo's logs.
+logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
+
 
 class InventoryStore:
     def __init__(self, persist_dir: str):
-        self._client = chromadb.PersistentClient(path=persist_dir)
+        # Telemetry is off: it is not needed here, and its failures print
+        # errors on every startup that would clutter a live demo's logs.
+        self._client = chromadb.PersistentClient(
+            path=persist_dir,
+            settings=Settings(anonymized_telemetry=False),
+        )
         self._collection = self._client.get_or_create_collection("inventory")
         self._model = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
