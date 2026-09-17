@@ -547,6 +547,25 @@ The single miss is Marathi *"मला कीबोर्ड घ्यायच�
 
 **Catalog embedding cost:** 1,200 items embedded in **22 seconds** on CPU — the one-time startup cost, paid per notebook boot.
 
+**STT latency (CPU)** — `python -m backend.stt.benchmark`, faster-whisper `small` int8, 2.1s clip, 5 runs after warm-up, on an **8-core i7-1185G7**:
+
+| Device | Mean | Min | Max | RTF |
+|---|---|---|---|---|
+| CPU | **1.06s** | 1.03s | 1.08s | **0.49** |
+| CUDA | not measurable locally (driver mismatch) — run on Colab | | | |
+
+**Read this number carefully, and say so out loud.** RTF 0.49 on 8 fast cores is *not* the Colab figure. Colab's free tier gives 2 vCPU of an older Xeon, so expect the RTF there to be several times worse — which is exactly why §3 estimated 1.5–3.5s for a 3s utterance. Re-run the benchmark on Colab and quote that number, not this one. This row's value is as an upper bound on how good CPU transcription gets.
+
+**Whisper hallucinates on non-speech** — found while building, and worth volunteering because it is a real production failure mode:
+
+| Input | Detected language | Transcript |
+|---|---|---|
+| Pure silence | en | `"you"` |
+| Low-level noise | **ko** | `"MBC 뉴스 이덕영입니다."` |
+| Room-level noise | **nn** | `"investigación"` |
+
+Two consequences, both real: a cough or door slam that trips VAD becomes a spurious LLM turn, and the bogus language code reaches the TTS stage, which has no Korean voice and would raise mid-call. Fixed with `vad_filter`, no-speech-probability filtering, and clamping the detected language to the three we can actually speak. **The clamp is the load-bearing part** — it converts a crash into a slightly-wrong-language answer.
+
 **Known retrieval limitation found while testing:** "cheap sneakers" returns a $159 shoe. Vector similarity matches *"sneakers"* and has no notion of *"cheap"* — price and stock constraints need metadata filtering (Chroma `where` clauses), not embeddings. Worth naming before they ask: **semantic similarity is not query understanding.**
 
 ### Still to record
