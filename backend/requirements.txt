@@ -1,0 +1,10 @@
+chromadb==0.5.5
+sentence-transformers==3.0.1
+
+# torch is deliberately NOT pinned: Colab ships a build matched to its CUDA
+# runtime, and forcing a specific version either takes ten minutes to install
+# or silently breaks GPU support for llama.cpp and faster-whisper.
+
+# llama-cpp-python is deliberately NOT listed: it needs CUDA build flags or it
+# installs a CPU-only build that runs at 1-3 tok/s with no error.
+# See backend/colab_notebook.md.
