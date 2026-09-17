@@ -1,0 +1,78 @@
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 16px;
+  color: #0f172a;
+}
+
+h1 {
+  font-size: 20px;
+}
+
+label {
+  display: block;
+  font-size: 13px;
+  color: #475569;
+  margin-top: 12px;
+}
+
+input,
+button {
+  width: 100%;
+  padding: 12px;
+  margin: 6px 0;
+  font-size: 16px; /* 16px avoids iOS zoom-on-focus */
+  box-sizing: border-box;
+}
+
+.status-row {
+  font-size: 13px;
+  color: #475569;
+}
+
+.timing-row {
+  font-size: 11px;
+  color: #64748b;
+  font-family: ui-monospace, monospace;
+  min-height: 14px;
+  word-break: break-word;
+}
+
+#mic-btn {
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 20px;
+  font-size: 18px;
+  touch-action: none; /* stop mobile long-press selection during push-to-talk */
+  user-select: none;
+}
+
+#mic-btn:disabled {
+  background: #94a3b8;
+}
+
+#transcript-log {
+  margin-top: 16px;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 8px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.line {
+  margin: 6px 0;
+  line-height: 1.4;
+}
+
+.line-agent {
+  color: #1d4ed8;
+}
+
+.line-system {
+  color: #b45309;
+  font-style: italic;
+  font-size: 13px;
+}

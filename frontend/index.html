@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voice Inventory Assistant</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main>
+    <h1>Voice Inventory Assistant</h1>
+
+    <label for="backend-url">Backend WebSocket URL</label>
+    <input id="backend-url" type="text" placeholder="wss://xxxx.ngrok-free.app/ws/session1" />
+    <button id="connect-btn">Connect</button>
+
+    <p class="status-row">
+      Status: <span id="status">disconnected</span>
+      &middot; Language: <span id="language">&mdash;</span>
+    </p>
+    <p class="timing-row" id="timing"></p>
+
+    <button id="mic-btn" disabled>Hold to talk</button>
+
+    <section id="transcript-log" aria-live="polite"></section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

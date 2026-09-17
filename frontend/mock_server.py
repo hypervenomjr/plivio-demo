@@ -28,50 +28,63 @@ def _fake_wav_bytes() -> bytes:
     return buffer.getvalue()
 
 
+async def _run_turn(websocket: WebSocket):
+    """Runs as a background task, mirroring backend.server.app._handle_turn.
+
+    Must NOT run inline in the receive loop: if it did, a chunk sent while
+    "speaking" would sit unread in the socket buffer until the turn finished,
+    and the interrupted path could never actually fire. The real server has
+    the identical requirement, for the identical reason.
+    """
+    await websocket.send_text(json.dumps({
+        "type": "transcript", "text": "do you have headphones", "language": "en",
+    }))
+    await asyncio.sleep(0.3)
+
+    for clause in ["Yes,", "we have Wireless Headphones in stock."]:
+        await websocket.send_text(json.dumps({"type": "answer_text", "text": clause}))
+        await websocket.send_bytes(_fake_wav_bytes())
+        await asyncio.sleep(0.4)
+
+    await websocket.send_text(json.dumps({"type": "timing", "stages": {
+        "stt": 1800.0, "retrieval": 25.0, "llm_first_token": 900.0,
+        "llm_total": 2100.0, "tts_total": 1200.0,
+        "time_to_first_audio": 3100.0, "turn_total": 4300.0,
+    }}))
+    await websocket.send_text(json.dumps({"type": "turn_end"}))
+
+
 @app.websocket("/ws/{session_id}")
 async def ws_endpoint(websocket: WebSocket, session_id: str):
     await websocket.accept()
-    speaking = False
+    turn_task = None
 
     while True:
         message = await websocket.receive()
 
         if message.get("type") == "websocket.disconnect":
+            if turn_task and not turn_task.done():
+                turn_task.cancel()
             break
 
         if message.get("bytes") is not None:
-            # A second "utterance" arriving while the mock is still "talking"
-            # simulates barge-in, so the frontend's interrupt handling is
-            # exercisable without a real VAD.
-            if speaking:
+            # A chunk arriving while a turn is in flight simulates barge-in,
+            # so the frontend's interrupt handling is exercisable without a
+            # real VAD.
+            if turn_task is not None and not turn_task.done():
+                turn_task.cancel()
+                try:
+                    await turn_task
+                except asyncio.CancelledError:
+                    pass
                 await websocket.send_text(json.dumps({"type": "interrupted"}))
-                speaking = False
+                turn_task = None
             continue
 
         if message.get("text") != "__end__":
             continue
 
-        speaking = True
-        await websocket.send_text(json.dumps({
-            "type": "transcript", "text": "do you have headphones", "language": "en",
-        }))
-        await asyncio.sleep(0.3)
-
-        for clause in ["Yes,", "we have Wireless Headphones in stock."]:
-            if not speaking:
-                break
-            await websocket.send_text(json.dumps({"type": "answer_text", "text": clause}))
-            await websocket.send_bytes(_fake_wav_bytes())
-            await asyncio.sleep(0.4)
-
-        if speaking:
-            await websocket.send_text(json.dumps({"type": "timing", "stages": {
-                "stt": 1800.0, "retrieval": 25.0, "llm_first_token": 900.0,
-                "llm_total": 2100.0, "tts_total": 1200.0,
-                "time_to_first_audio": 3100.0, "turn_total": 4300.0,
-            }}))
-            await websocket.send_text(json.dumps({"type": "turn_end"}))
-        speaking = False
+        turn_task = asyncio.create_task(_run_turn(websocket))
 
 
 if __name__ == "__main__":

@@ -82,6 +82,7 @@ Four more found while building:
 | faster-whisper 1.0.3 **raises on fully-filtered audio** | `ValueError: max() arg is an empty sequence` instead of an empty result | 3 |
 | **webrtcvad needs `setuptools<81`** | Imports `pkg_resources`, removed in setuptools 84: `ModuleNotFoundError` | 3 |
 | **webrtcvad frames vs browser chunks** | webrtcvad accepts only 10/20/30ms frames; a browser sends whatever its buffer works out to. The segmenter re-frames internally so callers can push any length | 3, 5 |
+| **A turn handler that runs inline in the receive loop can never see a barge-in** | Found in the mock server: processing a turn synchronously inside `while True: await websocket.receive()` means an incoming chunk sits unread in the socket buffer until the turn finishes on its own. Caught by testing the real UI against the mock in an actual browser — silent in unit tests, since nothing there drove two concurrent sends. Fixed by running the turn as `asyncio.create_task`, identically to the real server | 5, 6 |
 
 ## Global constraints (apply to every phase)
 
