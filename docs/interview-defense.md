@@ -556,6 +556,18 @@ The single miss is Marathi *"मला कीबोर्ड घ्यायच�
 
 **Read this number carefully, and say so out loud.** RTF 0.49 on 8 fast cores is *not* the Colab figure. Colab's free tier gives 2 vCPU of an older Xeon, so expect the RTF there to be several times worse — which is exactly why §3 estimated 1.5–3.5s for a 3s utterance. Re-run the benchmark on Colab and quote that number, not this one. This row's value is as an upper bound on how good CPU transcription gets.
 
+**TTS latency (CPU)** — MMS-TTS VITS, one typical clause, same 8-core i7:
+
+| Language | Cold (incl. model load) | Warm | Audio produced | RTF |
+|---|---|---|---|---|
+| English | 3.02s | **1.06s** | 4.08s | 0.26 |
+| Hindi | 2.32s | **0.65s** | 3.22s | 0.20 |
+| Marathi | 2.69s | **0.94s** | 4.00s | 0.24 |
+
+Two things to take from this. **RTF around 0.2–0.26 means synthesis runs roughly 4–5× faster than real time**, which is what makes clause-level streaming work: TTS keeps ahead of playback comfortably. And the **cold-vs-warm gap is 2–3 seconds** — entirely model loading. Unpreloaded, that cost lands on the caller's very first clause, the worst possible place. Hence `Synthesizer.preload()`, called at server startup.
+
+MMS emits at **16kHz**, which matches the pipeline's input rate — no resampling anywhere.
+
 **Whisper hallucinates on non-speech** — found while building, and worth volunteering because it is a real production failure mode:
 
 | Input | Detected language | Transcript |
