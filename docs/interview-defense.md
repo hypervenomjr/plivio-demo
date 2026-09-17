@@ -568,6 +568,18 @@ Two things to take from this. **RTF around 0.2–0.26 means synthesis runs rough
 
 MMS emits at **16kHz**, which matches the pipeline's input rate — no resampling anywhere.
 
+**Clause streaming, measured end-to-end (chunker + synthesizer).** A realistic answer — *"Yes, we have the Juniper Active Noise Cancelling Wireless Headphones at $446.19, with 80 units in stock."* — fed through as simulated 6-character token fragments:
+
+| | |
+|---|---|
+| First clause audible after | **0.28s** |
+| Total synthesis wall time | 2.45s |
+| Audio produced | 8.38s |
+
+**This is the single best number in the demo, and it is the one to lead with.** Without clause streaming the caller waits the full 2.45s of synthesis before hearing anything — and that is *after* generation finishes. With it, they hear "Yes," 280 milliseconds in, and the remaining clauses synthesize while earlier ones play. Synthesis runs ~3.4× faster than playback, so it never falls behind.
+
+It also confirms the two chunking edge cases hold in practice: `$446.19` stayed in one clause rather than splitting into "$446." and "19", and the danda handling means Hindi and Marathi stream the same way rather than buffering whole.
+
 **Whisper hallucinates on non-speech** — found while building, and worth volunteering because it is a real production failure mode:
 
 | Input | Detected language | Transcript |
