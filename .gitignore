@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+backend/rag/chroma_db/
+backend/history/*.db
