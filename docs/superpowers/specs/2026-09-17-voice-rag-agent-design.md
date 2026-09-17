@@ -11,8 +11,10 @@ integration.
 
 - No GPU available locally. Build/run on Google Colab (free GPU tier),
   expose endpoints via ngrok for testing.
-- All models must coexist in a single GPU session (~15GB VRAM on free
-  Colab T4): STT, LLM, TTS all resident at once.
+- GPU reserved solely for the LLM. STT and TTS both run on CPU, so they
+  never compete with the LLM for VRAM.
+- Must support multiple Indian languages (e.g. Hindi, Marathi) for both
+  input and output, not just English.
 - Streaming pipeline chosen over turn-based despite added complexity —
   user wants real-time feel, accepted the higher build/debug risk.
 
@@ -24,17 +26,23 @@ Browser (mic capture, WebSocket client, audio playback)
         ▼
 ngrok tunnel
         ▼
-Colab notebook: FastAPI + WebSocket server (single GPU process)
-   ├─ STT: faster-whisper (small/medium, int8), streaming decode
+Colab notebook: FastAPI + WebSocket server
+   ├─ STT (CPU): faster-whisper (small/medium, int8), streaming decode
+   │   — multilingual, covers Hindi well, Marathi with more error margin
    ├─ RAG: Chroma (in-notebook, local) + sentence-transformers embeddings
-   ├─ LLM: Qwen2.5-7B-Instruct, 4-bit quant (AWQ/GGUF via llama.cpp or vLLM)
-   └─ TTS: Piper (CPU-only, streaming-friendly) — chosen over XTTS
-     specifically to save VRAM headroom for the LLM
+   ├─ LLM (GPU): Qwen2.5-7B-Instruct, 4-bit quant (AWQ/GGUF via
+   │   llama.cpp or vLLM) — only model on GPU
+   └─ TTS (CPU): Meta MMS-TTS (VITS architecture, same lightweight
+       family as Piper) — per-language checkpoints, covers Hindi (hin),
+       Marathi (mar), and most other Indian languages individually.
+       Chosen over Piper (no Marathi voice) and AI4Bharat Indic-TTS
+       (heavier, more GPU-leaning) specifically for CPU-native fit +
+       Indic language coverage.
 ```
 
-Single process, single GPU. Piper runs on CPU so only STT + LLM compete
-for VRAM: quantized LLM (~5GB) + Whisper int8 (~1-2GB) should fit a 15GB
-T4.
+STT and TTS both CPU-only, so the entire Colab GPU is free for the
+quantized LLM (~5GB) — much larger safety margin than sharing VRAM
+three ways.
 
 ## Data flow (streaming turn)
 
@@ -43,12 +51,14 @@ T4.
 2. Server runs VAD (webrtcvad or Silero-VAD) on incoming chunks to detect
    utterance start/end — this is the turn boundary in a streaming setup.
 3. On speech-end: buffered audio finalized to text via faster-whisper.
+   Whisper auto-detects spoken language; detected language code carried
+   forward to select the matching MMS-TTS checkpoint for the reply.
 4. Text embedded, Chroma similarity search over the inventory catalog,
    top-k listings retrieved.
 5. Retrieved listings + user text + conversation history → prompt → local
    LLM generates response, streamed token-by-token.
 6. As LLM tokens arrive, sentence/clause chunks are pulled off and fed to
-   Piper incrementally — audio starts playing before the full LLM
+   MMS-TTS incrementally — audio starts playing before the full LLM
    response finishes generating.
 7. Audio chunks streamed back over WebSocket; browser plays them in
    order.
@@ -74,8 +84,8 @@ T4.
 
 - ASR fails / empty transcript: skip turn, wait for next VAD-triggered
   speech, no LLM call.
-- GPU OOM: catch, respond with a pre-baked (not generated) fallback audio
-  clip, log the error, keep the WebSocket alive if possible.
+- LLM GPU OOM: catch, respond with a pre-baked (not generated) fallback
+  audio clip, log the error, keep the WebSocket alive if possible.
 - RAG returns nothing relevant: LLM prompt instructs it to say no
   matching listings were found rather than hallucinate.
 - ngrok tunnel drops: browser detects WebSocket close, shows reconnect
