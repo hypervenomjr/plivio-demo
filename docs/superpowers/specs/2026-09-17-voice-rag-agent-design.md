@@ -11,8 +11,10 @@ integration.
 
 - No GPU available locally. Build/run on Google Colab (free GPU tier),
   expose endpoints via ngrok for testing.
-- GPU reserved solely for the LLM. STT and TTS both run on CPU, so they
-  never compete with the LLM for VRAM.
+- GPU reserved for the LLM. TTS always runs on CPU. STT defaults to CPU
+  but its device is configurable, because Whisper is the pipeline's
+  slowest stage and moving it to GPU costs only ~1.5GB of a 15GB budget —
+  both placements get benchmarked and the choice made on measurements.
 - Must support multiple Indian languages (e.g. Hindi, Marathi) for both
   input and output, not just English.
 - Streaming pipeline chosen over turn-based despite added complexity —
@@ -55,8 +57,12 @@ three ways.
    forward to select the matching MMS-TTS checkpoint for the reply.
 4. Text embedded, Chroma similarity search over the inventory catalog,
    top-k listings retrieved.
-5. Retrieved listings + user text + conversation history → prompt → local
-   LLM generates response, streamed token-by-token.
+5. Retrieved listings + user text + conversation history + the detected
+   language → prompt → local LLM generates response, streamed
+   token-by-token. The prompt states the reply language explicitly:
+   listings are written in English, so without that instruction a Hindi
+   question returns an English answer that the Hindi TTS voice then
+   renders as noise.
 6. As LLM tokens arrive, sentence/clause chunks are pulled off and fed to
    MMS-TTS incrementally — audio starts playing before the full LLM
    response finishes generating.
@@ -112,6 +118,11 @@ three ways.
 
 - Synthetic catalog, ~1000+ items (name, price, description, stock, etc),
   generated for this build — no real business data.
+- **Every item must have a distinct name and description.** A generator
+  that crosses a few adjectives with a few nouns produces hundreds of
+  duplicates, and retrieval then returns near-identical rows that no
+  embedding model can rank — making the RAG layer look broken when it is
+  working correctly.
 - Embedded once at startup into Chroma.
 - Chroma runs in-notebook (embedded, not a separate server), persists to
   local Colab disk. Same tradeoff as conversation history: wiped on
@@ -125,8 +136,16 @@ three ways.
   WebSocket URL.
 - Mic capture (getUserMedia), streams PCM chunks over WebSocket,
   receives + plays back streamed TTS audio.
+- **Must be served over HTTPS.** `getUserMedia` requires a secure context;
+  a page opened at `http://<lan-ip>` from a phone gets no microphone and
+  no useful error.
+- The device's native sample rate is whatever the hardware provides
+  (iOS ignores a requested rate), so the client downsamples to 16kHz in
+  software rather than asking the AudioContext for it.
+- Clause audio is queued and scheduled sequentially, not played on
+  arrival — otherwise overlapping clauses play on top of each other.
 - Minimal UI: mic on/off state, live transcript display, connection
-  status, language indicator (once detected).
+  status, language indicator (once detected), per-turn stage timings.
 - ngrok URL changes each time the Colab notebook restarts (free tier) —
   UI needs a way to point at the current tunnel URL (config field or
   query param), not hardcoded.
@@ -148,6 +167,15 @@ three ways.
 
 - Unit-level: RAG retrieval correctness (query → expected top-k items)
   against the seeded synthetic catalog.
+- Retrieval quality: a labeled set of ~30 queries across all three
+  languages, scored with recall@5 and MRR, reported per language. The
+  cross-lingual embedding claim is central to the design and needs
+  evidence rather than a demo anecdote.
+- Server orchestration: tested with fakes injected for every model, so
+  the full turn flow — including barge-in cancellation and the language
+  handoff — runs with no GPU, no weights and no audio files.
+- Instrumentation: the server measures each stage per turn and reports
+  them to the client, so latency claims come from the running system.
 - Manual end-to-end: browser test page, live voice test against the
   running Colab+ngrok endpoint — no automated audio-quality testing in
   scope.

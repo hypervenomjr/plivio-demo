@@ -6,7 +6,7 @@ Personal reference for defending the architecture, data flow, latency, cost and 
 >
 > **The system isn't built yet, so nothing here has been measured.** Every latency and cost figure is an *estimate derived from published model and hardware characteristics*, with the arithmetic shown so the reasoning is defensible even before the real numbers exist.
 >
-> The durable content of this document is **§2 (how it works), §6 (why each choice was made), and §7 (what's still broken)**. Those don't change when measurements land. The numbers get filled in from [§11 Measurement checklist](#11-measurement-checklist) once the build is running.
+> The durable content of this document is **§2 (how it works), §6 (why each choice was made), §7 (what's still broken), and §10 (taking this to a real phone call)**. Those don't change when measurements land. The numbers get filled in from [§12 Measurement checklist](#12-measurement-checklist) once the build is running.
 >
 > Two rules for the interview:
 > 1. Say **"estimated"** out loud for anything not yet measured. A labeled estimate with visible arithmetic beats a confident wrong number every time.
@@ -375,23 +375,27 @@ Every stage is a pure transformation except the history store, and the server re
 
 Volunteering a limitation with a fix attached reads as engineering maturity. Getting caught not knowing reads as the opposite.
 
-### 7.1 The CPU-only decision is the latency bottleneck
+### 7.1 STT placement — measured, not assumed
 
-Whisper on 2 vCPU is an estimated 1.5–3.5s — roughly half the total budget. Moving Whisper small to the GPU in fp16 costs **~1.5GB of VRAM** and would cut that stage to an estimated **~150ms**, a 10–20× improvement on the single worst stage.
+Whisper on 2 vCPU is an estimated 1.5–3.5s, roughly half the total budget. Moving Whisper small to the GPU in fp16 costs **~1.5GB of VRAM** and should cut that stage to an estimated **~150ms**.
 
 VRAM math: 4.7GB (7B Q4) + 1.5GB (Whisper small fp16) ≈ **6.2GB of 15GB available.** It fits comfortably.
 
-> "I optimized for not running out of memory on hardware I don't control, and I paid for it in latency. Knowing what the budget actually looks like, I'd move Whisper to the GPU and keep only TTS on CPU. That's roughly two seconds off the worst case for about a gigabyte and a half of VRAM."
+Rather than pick one and defend it from theory, `Transcriber` takes a `device` argument and `backend/stt/benchmark.py` measures both on the real hardware. **Quote the measured numbers** and say which one the demo ships with and why.
 
-### 7.2 Barge-in is specified but not implemented
+> "CPU was the conservative default — it guarantees the GPU is never contended. But Whisper is the slowest stage, so I made the placement a parameter and benchmarked both on the actual T4. [Measured numbers.] The demo runs [choice] because [reason from the data]."
 
-The design calls for interrupting the agent when the caller talks over it. The current server processes a turn synchronously and doesn't read the socket during generation, so **it cannot currently be interrupted.**
+That is a materially stronger answer than either placement argued in the abstract.
 
-The fix: run turn handling as a cancellable `asyncio.Task`, keep reading the socket during generation, cancel on VAD-detected incoming speech. Own this plainly — "it's in the design, not yet in the code, and here's the shape of the fix."
+### 7.2 Barge-in works, but generation is not truly async
 
-### 7.3 No retrieval quality evaluation yet
+Barge-in is implemented: the turn runs as a cancellable `asyncio.Task`, the receive loop keeps reading during generation, and the rising edge of VAD speech cancels the in-flight answer and tells the client to flush queued audio.
 
-There is no recall@k number. The fix is small and worth describing precisely: hand-label ~50 queries across all three languages with their expected item, then measure **recall@5** and **MRR**. Without it, "retrieval works" is an anecdote, not a claim. If there's time before the interview, this is the highest-value addition to the demo.
+**The honest caveat:** `llm_engine.generate` is a *synchronous* generator, so the event loop only regains control at the explicit `await asyncio.sleep(0)` between fragments. That is enough for barge-in to fire within a token or two, but it isn't genuinely concurrent — a long synchronous call inside the loop would still block it. The correct version runs generation in a thread executor. Know this distinction; it's a natural follow-up question.
+
+### 7.3 Retrieval evaluation is thin
+
+There *is* a recall@5 and MRR measurement across ~30 labeled queries in all three languages, which is the important thing. But 30 queries is a small sample — treat the per-language numbers as directional, especially the 10-query Hindi and Marathi splits. If cross-lingual recall is notably below English, that's a finding to explain (thinner Indic representation in the embedding model's training data), not to bury.
 
 ### 7.4 Single-session only
 
@@ -437,7 +441,40 @@ Literally true of the codebase: the server takes every model as an injected depe
 
 ---
 
-## 10. Hard questions, prepared answers
+## 10. Taking this to a real phone call
+
+**Expect this question, and expect it to be the one they care most about.** The demo runs in a browser; the obvious follow-up is what changes when a real PSTN call arrives. Have a concrete answer, not a hand-wave.
+
+### What actually changes
+
+Almost nothing in the pipeline. The transport layer is replaced; the seven processing stages stay exactly as they are.
+
+| Concern | Browser demo | Over a real call |
+|---|---|---|
+| Call setup | User pastes a `wss://` URL | Inbound call hits a number; the platform requests an XML/answer document that points at a WebSocket endpoint |
+| Media transport | Browser WebSocket, raw PCM | The provider's media-stream WebSocket, base64 audio frames in JSON envelopes |
+| Audio format | 16kHz mono PCM16 | **8kHz μ-law** — telephony standard |
+| Turn detection | VAD over incoming frames | Identical — VAD over incoming frames |
+| Sending audio back | Binary WAV frames | Base64 μ-law frames on the same socket |
+| Interruption | `interrupted` message, client flushes | A `clear` control message telling the platform to drop buffered playback |
+
+### The three real engineering differences
+
+**1. Codec and sample rate.** Telephony is 8kHz μ-law, not 16kHz linear PCM. So the pipeline gains a μ-law decode and an 8k→16k upsample on the way in, and the reverse on the way out. Whisper expects 16kHz, so upsampling is required — and worth naming honestly: **8kHz source audio carries less information, so transcription accuracy drops relative to the browser demo.** That's inherent to telephony, not a flaw in the design.
+
+**2. Barge-in moves server-side.** In the browser, the client owns the audio queue and flushes it on `interrupted`. Over a call, the provider is buffering the audio you already sent, so interrupting means sending that platform's clear/flush control message. Same trigger, same VAD rising edge — different actor executes the stop. **The barge-in logic I built is the part that transfers; only the flush call changes.**
+
+**3. Latency matters more, and echo becomes real.** Browsers give you echo cancellation for free via `getUserMedia` constraints. A phone line does not — the agent's own voice can return on the inbound leg and trip the VAD, causing the agent to interrupt itself. Production needs echo handling or a VAD that gates on known-playback windows. This is a genuinely hard problem and worth naming as one.
+
+### The framing sentence
+
+> "The pipeline was built so the transport is the only swappable part — the server takes audio frames in and emits audio frames out, and it never knew where they came from. Moving to a real call means a codec shim, an upsample, and routing barge-in through the platform's clear message instead of the browser's audio queue. The VAD, STT, retrieval, LLM and TTS stages don't change at all."
+
+Then point at the dependency injection: `create_app()` takes every model as an argument and the WebSocket handler is thin by design.
+
+---
+
+## 11. Hard questions, prepared answers
 
 **"How do you stop it hallucinating products you don't sell?"**
 Three layers. The system prompt constrains the model to the provided listings and instructs it to say nothing matches when retrieval is empty. `temperature=0.3` keeps it close to source. Stop sequences prevent it inventing subsequent dialogue. **What's missing:** a post-generation check that every product name in the answer actually appears in the retrieved set. Cheap, deterministic, and the next thing I'd add.
@@ -458,11 +495,11 @@ Use §2.2. Eight steps, and land on step 7 — clause-level streaming — becaus
 Whisper to GPU (§7.1) — largest single win, ~2s for ~1.5GB VRAM. Then drop the VAD threshold from 600ms to ~400ms for another 200ms at some UX risk. Then a smaller LLM if answer quality holds. In that order, because that's the order of return per unit of effort.
 
 **"Why should I believe any of these numbers?"**
-The honest answer is the right one: *"Those are derived estimates from model size, memory bandwidth and published real-time factors — I've shown the arithmetic. Here's what I measured on real hardware: [§11]."* Then show the measured table.
+The honest answer is the right one: *"Those are derived estimates from model size, memory bandwidth and published real-time factors — I've shown the arithmetic. Here's what I measured on real hardware: [§12]."* Then show the measured table.
 
 ---
 
-## 11. Measurement checklist
+## 12. Measurement checklist
 
 Run these once the build is working and fill in the table. **Each measured number stated with its conditions is worth more than the entire estimate table.**
 

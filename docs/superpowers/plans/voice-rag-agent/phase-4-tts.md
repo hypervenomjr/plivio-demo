@@ -53,9 +53,13 @@ Language codes accepted match what Phase 3's `Transcriber` emits: `"en"`, `"hi"`
 ```text
 # backend/requirements.txt (append)
 transformers==4.44.2
-torch==2.4.0
 scipy==1.14.0
+# torch is deliberately NOT pinned: Colab ships a build matched to its CUDA
+# runtime, and forcing a specific version either takes ten minutes to install
+# or silently breaks GPU support for llama.cpp and faster-whisper.
 ```
+
+If running locally without Colab's preinstalled torch, install it separately following the instructions on pytorch.org for your platform.
 
 - [ ] **Step 2: Write the failing test**
 

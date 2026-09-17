@@ -1,10 +1,10 @@
-# Phase 3: Speech-to-Text (faster-whisper, CPU) — Implementation Plan
+# Phase 3: Speech-to-Text (faster-whisper) — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn a stream of raw PCM audio chunks into finished utterance transcripts plus a detected language code, entirely on CPU.
+**Goal:** Turn a stream of raw PCM audio chunks into finished utterance transcripts plus a detected language code, and measure whether that is faster on CPU or GPU.
 
-**Architecture:** Two independent pieces. A `UtteranceSegmenter` runs webrtcvad over incoming 30ms PCM frames and emits the buffered utterance once trailing silence crosses a threshold — this is the turn boundary in a streaming pipeline. A `Transcriber` wraps faster-whisper in int8 CPU mode and returns both the text and the auto-detected language, which the TTS stage later uses to pick a matching voice.
+**Architecture:** Two independent pieces plus a benchmark. A `UtteranceSegmenter` runs webrtcvad over incoming 30ms PCM frames and emits the buffered utterance once trailing silence crosses a threshold — the turn boundary in a streaming pipeline — and exposes `speech_active` so the server can detect barge-in. A `Transcriber` wraps faster-whisper and returns both the text and the auto-detected language, which the TTS stage later uses to pick a matching voice. Device is a parameter, defaulting to CPU.
 
 **Tech Stack:** Python 3.10+, faster-whisper, webrtcvad.
 
@@ -14,18 +14,25 @@
 
 ## Isolation
 
-Depends on **nothing**. Runs entirely on CPU, locally, with no Colab, no GPU, no server, no other phase.
+Depends on **nothing** and needs no other phase. Tasks 3.1 and 3.2 run locally on CPU; only the Task 3.3 benchmark wants a GPU, and it degrades gracefully without one.
 
 ## Contract produced (Phase 5 relies on these — do not change without updating it)
 
-- `Transcriber(model_size: str = "small", compute_type: str = "int8")`
+- `Transcriber(model_size: str = "small", device: str = "cpu", compute_type: str = None)`
 - `Transcriber.transcribe(audio_path: str) -> {"text": str, "language": str}` — `language` is an ISO code such as `"en"`, `"hi"`, `"mr"`
 - `UtteranceSegmenter(sample_rate: int = 16000, silence_ms: int = 600, frame_ms: int = 30)`
 - `UtteranceSegmenter.push(pcm_chunk: bytes) -> bytes | None` — returns the accumulated utterance on end-of-speech, otherwise `None`
+- `UtteranceSegmenter.speech_active -> bool` — True while an utterance is in progress; the server reads its rising edge to detect barge-in
+
+## Why device is a parameter, not a constant
+
+The design reserves the GPU for the LLM, and CPU is the default. But Whisper on 2 vCPU is the pipeline's slowest stage by a wide margin, and moving it to GPU costs only ~1.5GB of VRAM against a 15GB budget where the LLM uses ~4.7GB.
+
+Making this a constructor argument rather than a hardcoded choice means **both placements can be measured on the real hardware** and the faster one chosen with evidence. "I benchmarked both" is a stronger position than either placement defended from theory.
 
 ## Global Constraints
 
-- STT runs on CPU only — never allocate GPU here; the GPU is reserved for the LLM. *(spec: Constraints)*
+- STT defaults to CPU so the GPU stays free for the LLM; `device="cuda"` is available and is expected to be measurably faster. *(spec: Constraints)*
 - Must handle English, Hindi and Marathi input; Whisper auto-detects the language and the detected code is carried forward to select the TTS voice. *(spec: Constraints, Data flow step 3)*
 - Audio format throughout is 16kHz mono 16-bit PCM. *(spec: Data flow step 1)*
 - An empty transcript means the turn is skipped, with no LLM call — the consuming server enforces this, but `transcribe` must return an empty string rather than raising. *(spec: Error handling)*
@@ -44,7 +51,7 @@ Depends on **nothing**. Runs entirely on CPU, locally, with no Colab, no GPU, no
 **Interfaces:**
 - Consumes: a path to a 16kHz mono WAV file.
 - Produces:
-  - `class Transcriber` with `__init__(self, model_size: str = "small", compute_type: str = "int8")`
+  - `class Transcriber` with `__init__(self, model_size: str = "small", device: str = "cpu", compute_type: str = None)` — `compute_type` defaults to `int8` on CPU and `float16` on CUDA
   - `Transcriber.transcribe(self, audio_path: str) -> dict` returning `{"text": str, "language": str}`
 
 - [ ] **Step 1: Add the dependency and create the test fixture**
@@ -69,7 +76,7 @@ FIXTURE = "backend/tests/fixtures/hello_english.wav"
 
 @pytest.mark.skipif(not os.path.exists(FIXTURE), reason="Record the fixture WAV first")
 def test_transcribe_returns_text_and_language():
-    t = Transcriber(model_size="small", compute_type="int8")
+    t = Transcriber(model_size="small", device="cpu")
     result = t.transcribe(FIXTURE)
     assert "headphones" in result["text"].lower()
     assert result["language"] == "en"
@@ -77,9 +84,16 @@ def test_transcribe_returns_text_and_language():
 
 @pytest.mark.skipif(not os.path.exists(FIXTURE), reason="Record the fixture WAV first")
 def test_transcribe_returns_expected_keys():
-    t = Transcriber(model_size="small", compute_type="int8")
+    t = Transcriber(model_size="small", device="cpu")
     result = t.transcribe(FIXTURE)
     assert set(result.keys()) == {"text", "language"}
+
+
+@pytest.mark.skipif(not os.path.exists(FIXTURE), reason="Record the fixture WAV first")
+def test_compute_type_defaults_by_device():
+    assert Transcriber(device="cpu")._compute_type == "int8"
+    assert Transcriber.resolve_compute_type("cuda", None) == "float16"
+    assert Transcriber.resolve_compute_type("cpu", "int8_float16") == "int8_float16"
 ```
 
 - [ ] **Step 3: Run test to verify it fails**
@@ -96,9 +110,21 @@ from faster_whisper import WhisperModel
 
 
 class Transcriber:
-    def __init__(self, model_size: str = "small", compute_type: str = "int8"):
-        # device="cpu" is deliberate: the GPU is reserved for the LLM.
-        self._model = WhisperModel(model_size, device="cpu", compute_type=compute_type)
+    def __init__(self, model_size: str = "small", device: str = "cpu",
+                 compute_type: str = None):
+        # CPU is the default so the GPU stays free for the LLM, but this is a
+        # parameter rather than a constant: Whisper is the slowest stage in the
+        # pipeline and moving it to CUDA costs only ~1.5GB of VRAM. Measure both.
+        self._device = device
+        self._compute_type = self.resolve_compute_type(device, compute_type)
+        self._model = WhisperModel(model_size, device=device,
+                                   compute_type=self._compute_type)
+
+    @staticmethod
+    def resolve_compute_type(device: str, compute_type: str | None) -> str:
+        if compute_type is not None:
+            return compute_type
+        return "float16" if device == "cuda" else "int8"
 
     def transcribe(self, audio_path: str) -> dict:
         segments, info = self._model.transcribe(audio_path)
@@ -109,7 +135,7 @@ class Transcriber:
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `pip install -r backend/requirements.txt && pytest backend/tests/test_transcribe.py -v`
-Expected: PASS (2 tests). The first run downloads the Whisper weights, so it is slow.
+Expected: PASS (3 tests). The first run downloads the Whisper weights, so it is slow.
 
 - [ ] **Step 6: Commit**
 
@@ -132,6 +158,7 @@ git commit -m "feat: add CPU faster-whisper transcription wrapper"
 - Produces:
   - `class UtteranceSegmenter` with `__init__(self, sample_rate: int = 16000, silence_ms: int = 600, frame_ms: int = 30)`
   - `UtteranceSegmenter.push(self, pcm_chunk: bytes) -> bytes | None`
+  - `UtteranceSegmenter.speech_active -> bool` property — True from the first speech frame until the utterance is emitted. The server watches its **rising edge** to detect the caller talking over the agent, which is how barge-in is triggered.
 
 - [ ] **Step 1: Add the dependency**
 
@@ -206,6 +233,25 @@ def test_segmenter_resets_between_utterances():
     # The buffer was cleared after the first utterance rather than accumulating,
     # so two identical utterances produce identical byte counts.
     assert len(second) == len(first)
+
+
+def test_speech_active_is_false_before_any_speech():
+    seg = UtteranceSegmenter(silence_ms=90)
+    assert seg.speech_active is False
+    seg.push(_silence_frame())
+    assert seg.speech_active is False
+
+
+def test_speech_active_is_true_during_speech():
+    seg = UtteranceSegmenter(silence_ms=90)
+    seg.push(_tone_frame())
+    assert seg.speech_active is True
+
+
+def test_speech_active_is_false_after_utterance_emitted():
+    seg = UtteranceSegmenter(silence_ms=90)
+    _drive_one_utterance(seg)
+    assert seg.speech_active is False
 ```
 
 - [ ] **Step 3: Run test to verify it fails**
@@ -229,6 +275,15 @@ class UtteranceSegmenter:
         self._buffer = bytearray()
         self._silence_run = 0
         self._speech_started = False
+
+    @property
+    def speech_active(self) -> bool:
+        """True while an utterance is in progress.
+
+        The server watches the rising edge of this to detect the caller
+        speaking over the agent, which triggers barge-in.
+        """
+        return self._speech_started
 
     def push(self, pcm_chunk: bytes) -> bytes | None:
         is_speech = self._vad.is_speech(pcm_chunk, self._sample_rate)
@@ -256,7 +311,7 @@ class UtteranceSegmenter:
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `pytest backend/tests/test_vad.py -v`
-Expected: PASS (4 tests)
+Expected: PASS (7 tests)
 
 - [ ] **Step 6: Commit**
 
@@ -267,6 +322,70 @@ git commit -m "feat: add VAD-based utterance segmenter for streaming STT"
 
 ---
 
+### Task 3.3: Benchmark CPU vs GPU transcription
+
+Produces the measurement that settles the placement question, and a number for the interview notes.
+
+**Files:**
+- Create: `backend/stt/benchmark.py`
+
+**Interfaces:**
+- Consumes: `Transcriber` from Task 3.1, the fixture WAV.
+- Produces: a printed comparison. No tests — it is a measurement script.
+
+- [ ] **Step 1: Write the benchmark**
+
+```python
+# backend/stt/benchmark.py
+"""Measure transcription latency on CPU vs GPU.
+
+The design reserves the GPU for the LLM, but Whisper is the slowest stage in
+the pipeline. This script replaces an argument with a number.
+"""
+import statistics
+import time
+
+from backend.stt.transcribe import Transcriber
+
+FIXTURE = "backend/tests/fixtures/hello_english.wav"
+RUNS = 5
+
+
+def measure(device: str) -> list[float]:
+    transcriber = Transcriber(model_size="small", device=device)
+    transcriber.transcribe(FIXTURE)  # warm-up, excluded from results
+    timings = []
+    for _ in range(RUNS):
+        start = time.perf_counter()
+        transcriber.transcribe(FIXTURE)
+        timings.append(time.perf_counter() - start)
+    return timings
+
+
+if __name__ == "__main__":
+    for device in ["cpu", "cuda"]:
+        try:
+            timings = measure(device)
+            print(f"{device}: mean {statistics.mean(timings):.2f}s  "
+                  f"min {min(timings):.2f}s  max {max(timings):.2f}s")
+        except Exception as exc:
+            print(f"{device}: unavailable ({type(exc).__name__}: {exc})")
+```
+
+- [ ] **Step 2: Run it on Colab and record the result**
+
+Run: `python -m backend.stt.benchmark`
+Expected: two lines. Copy both into `docs/interview-defense.md` §12 (Measurement checklist), and use the result to decide what `backend/main.py` passes for `device`.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add backend/stt/benchmark.py
+git commit -m "feat: add CPU vs GPU transcription benchmark"
+```
+
+---
+
 ## Phase 3 done when
 
-`pytest backend/tests/test_transcribe.py backend/tests/test_vad.py -v` passes on CPU, with no GPU and no dependency on any other phase.
+`pytest backend/tests/test_transcribe.py backend/tests/test_vad.py -v` passes on CPU, and `python -m backend.stt.benchmark` has produced a recorded CPU-vs-GPU comparison on the real Colab hardware.

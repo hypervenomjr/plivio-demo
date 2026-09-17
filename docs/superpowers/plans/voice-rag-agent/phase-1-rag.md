@@ -68,6 +68,19 @@ def test_generate_catalog_ids_unique():
     items = generate_catalog(n=200, seed=2)
     ids = [item["id"] for item in items]
     assert len(ids) == len(set(ids))
+
+def test_generate_catalog_names_are_distinct():
+    # Retrieval is meaningless if the catalog is 1200 copies of 56 names:
+    # the top-5 would be near-identical rows the embeddings cannot rank.
+    items = generate_catalog(n=1200, seed=42)
+    names = [item["name"] for item in items]
+    assert len(set(names)) == len(names)
+
+def test_generate_catalog_descriptions_carry_searchable_attributes():
+    items = generate_catalog(n=100, seed=3)
+    for item in items:
+        assert item["category"].split(" ")[0].lower() in item["description"].lower()
+        assert len(item["description"].split()) >= 12
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -79,29 +92,113 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'backend.data.generate
 
 ```python
 # backend/data/generate_catalog.py
+"""Synthetic inventory catalog.
+
+Diversity is the whole point here. A naive generator (a handful of adjectives
+crossed with a handful of nouns) produces hundreds of items sharing the same
+name and description, which makes retrieval look broken: the top-5 comes back
+as five indistinguishable rows, and no embedding model can rank identical
+text. Every item below gets a unique name and a description carrying its own
+searchable attributes.
+"""
 import random
 import uuid
 
-CATEGORIES = ["Electronics", "Home & Kitchen", "Apparel", "Books", "Sports", "Toys", "Grocery"]
-ADJECTIVES = ["Compact", "Premium", "Portable", "Wireless", "Eco-Friendly", "Heavy-Duty", "Classic"]
-NOUNS = ["Blender", "Backpack", "Headphones", "Lamp", "Notebook", "Sneakers", "Kettle", "Charger"]
+PRODUCTS = {
+    "Electronics": [
+        ("Wireless Headphones", ["40mm drivers", "active noise cancelling", "open-back"]),
+        ("Bluetooth Speaker", ["waterproof", "360-degree sound", "clip-on"]),
+        ("USB-C Charger", ["65W GaN", "dual-port", "travel-size"]),
+        ("Mechanical Keyboard", ["hot-swappable", "low-profile", "tenkeyless"]),
+        ("Webcam", ["1080p", "4K HDR", "auto-framing"]),
+        ("Power Bank", ["10000mAh", "20000mAh", "magnetic wireless"]),
+    ],
+    "Home & Kitchen": [
+        ("Blender", ["personal size", "1200W professional", "cordless"]),
+        ("Electric Kettle", ["gooseneck", "temperature-control", "glass body"]),
+        ("Cast Iron Skillet", ["10-inch", "pre-seasoned", "enamelled"]),
+        ("Air Fryer", ["4-quart", "dual-basket", "convection oven"]),
+        ("Coffee Grinder", ["burr", "blade", "hand-crank"]),
+        ("Desk Lamp", ["LED dimmable", "clamp-mount", "warm-white"]),
+    ],
+    "Apparel": [
+        ("Running Shoes", ["trail", "road", "carbon-plate"]),
+        ("Rain Jacket", ["packable", "3-layer shell", "insulated"]),
+        ("Cotton T-Shirt", ["heavyweight", "pocket", "long-sleeve"]),
+        ("Denim Jacket", ["oversized", "sherpa-lined", "stonewashed"]),
+        ("Wool Socks", ["merino hiking", "cushioned crew", "ankle"]),
+        ("Baseball Cap", ["unstructured", "mesh-back", "waxed cotton"]),
+    ],
+    "Books": [
+        ("Cookbook", ["weeknight vegetarian", "regional Indian", "baking"]),
+        ("Novel", ["literary fiction", "detective", "science fiction"]),
+        ("Field Guide", ["birds", "wildflowers", "night sky"]),
+        ("Notebook", ["dot-grid", "ruled hardcover", "pocket softcover"]),
+        ("Biography", ["scientist", "musician", "explorer"]),
+        ("Atlas", ["world", "historical", "road"]),
+    ],
+    "Sports": [
+        ("Yoga Mat", ["cork", "extra-thick", "travel-fold"]),
+        ("Dumbbell Set", ["adjustable", "hex rubber", "neoprene"]),
+        ("Cricket Bat", ["English willow", "Kashmir willow", "junior"]),
+        ("Water Bottle", ["insulated steel", "collapsible", "wide-mouth"]),
+        ("Resistance Bands", ["loop set", "tube with handles", "fabric hip"]),
+        ("Badminton Racket", ["carbon graphite", "aluminium", "beginner"]),
+    ],
+    "Toys": [
+        ("Building Blocks", ["classic brick", "magnetic tile", "wooden"]),
+        ("Puzzle", ["1000-piece landscape", "wooden 3D", "floor"]),
+        ("Board Game", ["strategy", "party", "two-player"]),
+        ("Remote Control Car", ["off-road", "drift", "mini"]),
+        ("Stuffed Animal", ["elephant", "bear", "dinosaur"]),
+        ("Art Set", ["watercolour", "coloured pencil", "modelling clay"]),
+    ],
+    "Grocery": [
+        ("Ground Coffee", ["single-origin Ethiopian", "dark roast blend", "decaf"]),
+        ("Green Tea", ["sencha", "jasmine", "matcha"]),
+        ("Olive Oil", ["extra-virgin", "cold-pressed", "infused"]),
+        ("Basmati Rice", ["aged", "brown", "organic"]),
+        ("Dark Chocolate", ["70% cocoa", "sea-salt", "orange"]),
+        ("Mixed Nuts", ["roasted salted", "raw unsalted", "honey-glazed"]),
+    ],
+}
+
+BRANDS = ["Aurora", "Nimbus", "Vertex", "Kestrel", "Lumen", "Harbour", "Terra",
+          "Orbit", "Sable", "Cobalt", "Juniper", "Marlow", "Anvil", "Sonnet", "Pike"]
 
 
 def generate_catalog(n: int, seed: int = 42) -> list[dict]:
     rng = random.Random(seed)
+
+    # Build every unique (brand, product, variant, category) combination first,
+    # then sample from it, so no two items can ever share a name.
+    combos = []
+    for category, products in PRODUCTS.items():
+        for base, variants in products:
+            for variant in variants:
+                for brand in BRANDS:
+                    combos.append((brand, base, variant, category))
+    rng.shuffle(combos)
+
+    if n > len(combos):
+        raise ValueError(f"Requested {n} items but only {len(combos)} unique combinations exist")
+
     items = []
-    for _ in range(n):
-        adjective = rng.choice(ADJECTIVES)
-        noun = rng.choice(NOUNS)
-        category = rng.choice(CATEGORIES)
-        name = f"{adjective} {noun}"
+    for brand, base, variant, category in combos[:n]:
+        name = f"{brand} {variant.title()} {base}"
+        price = round(rng.uniform(5.0, 500.0), 2)
+        stock = rng.randint(0, 500)
+        availability = "in stock" if stock > 0 else "currently out of stock"
         items.append({
             "id": str(uuid.uuid4()),
             "name": name,
-            "description": f"{name} in the {category} category. Durable build, "
-                           f"well-reviewed, ships within 2 days.",
-            "price": round(rng.uniform(5.0, 500.0), 2),
-            "stock": rng.randint(0, 500),
+            "description": (
+                f"{name} is a {variant} {base.lower()} in the {category} category. "
+                f"Priced at ${price}, {availability} with {stock} units on hand. "
+                f"Popular with customers looking for a {variant} option."
+            ),
+            "price": price,
+            "stock": stock,
             "category": category,
         })
     return items
@@ -112,7 +209,10 @@ if __name__ == "__main__":
     catalog = generate_catalog(n=1200, seed=42)
     with open("backend/data/catalog.json", "w") as f:
         json.dump(catalog, f, indent=2)
+    print(f"Wrote {len(catalog)} items with {len({i['name'] for i in catalog})} unique names")
 ```
+
+Note the deliberate structure: `15 brands × 7 categories × 6 products × 3 variants = 1,890` unique combinations, sampled down to 1,200. Every name is distinct and every description carries the attributes (`variant`, `category`, price, availability) that retrieval needs as signal.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -320,6 +420,158 @@ git commit -m "feat: add script to load full catalog into Chroma"
 
 ---
 
+### Task 1.4: Retrieval quality evaluation (recall@5 and MRR)
+
+Without this, "retrieval works" is an anecdote. With it, it is a number you can defend.
+
+**Files:**
+- Create: `backend/rag/eval_queries.json`
+- Create: `backend/rag/evaluate.py`
+- Test: `backend/tests/test_evaluate.py`
+
+**Interfaces:**
+- Consumes: `InventoryStore` from Task 1.2, the loaded Chroma store from Task 1.3.
+- Produces: `evaluate(store, queries: list[dict], k: int = 5) -> dict` returning `{"recall_at_k": float, "mrr": float, "n": int, "misses": list[dict]}`
+
+- [ ] **Step 1: Build the labeled query set**
+
+Pick 30 real items out of `backend/data/catalog.json` and write a natural spoken question for each — 10 English, 10 Hindi, 10 Marathi. Multilingual coverage is the point: the cross-lingual embedding claim is central to the architecture, so it needs evidence.
+
+```json
+[
+  {"query": "do you have any noise cancelling headphones", "expected_id": "<paste a real uuid>", "language": "en"},
+  {"query": "I need a cordless blender for smoothies", "expected_id": "<paste a real uuid>", "language": "en"},
+  {"query": "क्या आपके पास वाटरप्रूफ स्पीकर है", "expected_id": "<paste a real uuid>", "language": "hi"},
+  {"query": "तुमच्याकडे योगा मॅट आहे का", "expected_id": "<paste a real uuid>", "language": "mr"}
+]
+```
+
+Fill it out to 30 entries. Paste real `id` values from the generated catalog — invented ids will silently score zero.
+
+- [ ] **Step 2: Write the failing test**
+
+```python
+# backend/tests/test_evaluate.py
+from backend.rag.evaluate import evaluate
+
+
+class StubStore:
+    """Returns a fixed ranking so the metric maths can be checked exactly."""
+    def __init__(self, ranking):
+        self._ranking = ranking
+
+    def query(self, text, top_k=5):
+        return [{"id": item_id} for item_id in self._ranking[:top_k]]
+
+
+def test_recall_counts_hit_anywhere_in_top_k():
+    store = StubStore(["a", "b", "c", "d", "e"])
+    result = evaluate(store, [{"query": "q", "expected_id": "e", "language": "en"}], k=5)
+    assert result["recall_at_k"] == 1.0
+
+
+def test_recall_counts_miss_outside_top_k():
+    store = StubStore(["a", "b", "c", "d", "e"])
+    result = evaluate(store, [{"query": "q", "expected_id": "zzz", "language": "en"}], k=5)
+    assert result["recall_at_k"] == 0.0
+    assert len(result["misses"]) == 1
+
+
+def test_mrr_uses_reciprocal_of_rank():
+    store = StubStore(["a", "b", "c"])
+    result = evaluate(store, [{"query": "q", "expected_id": "c", "language": "en"}], k=5)
+    assert result["mrr"] == pytest.approx(1 / 3)
+
+
+def test_reports_count():
+    store = StubStore(["a"])
+    queries = [{"query": "q", "expected_id": "a", "language": "en"}] * 4
+    assert evaluate(store, queries, k=5)["n"] == 4
+```
+
+Add `import pytest` at the top of the file.
+
+- [ ] **Step 3: Run test to verify it fails**
+
+Run: `pytest backend/tests/test_evaluate.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'backend.rag.evaluate'`
+
+- [ ] **Step 4: Write minimal implementation**
+
+```python
+# backend/rag/evaluate.py
+import json
+
+
+def evaluate(store, queries: list[dict], k: int = 5) -> dict:
+    hits = 0
+    reciprocal_ranks = []
+    misses = []
+
+    for case in queries:
+        results = store.query(case["query"], top_k=k)
+        ids = [r["id"] for r in results]
+        if case["expected_id"] in ids:
+            hits += 1
+            rank = ids.index(case["expected_id"]) + 1
+            reciprocal_ranks.append(1 / rank)
+        else:
+            reciprocal_ranks.append(0.0)
+            misses.append({"query": case["query"], "language": case.get("language"),
+                           "expected_id": case["expected_id"], "got": ids})
+
+    n = len(queries)
+    return {
+        "recall_at_k": hits / n if n else 0.0,
+        "mrr": sum(reciprocal_ranks) / n if n else 0.0,
+        "n": n,
+        "misses": misses,
+    }
+
+
+if __name__ == "__main__":
+    from backend.rag.store import InventoryStore
+
+    with open("backend/rag/eval_queries.json") as f:
+        queries = json.load(f)
+
+    store = InventoryStore(persist_dir="backend/rag/chroma_db")
+    result = evaluate(store, queries, k=5)
+
+    print(f"n={result['n']}  recall@5={result['recall_at_k']:.2%}  MRR={result['mrr']:.3f}")
+
+    by_language = {}
+    for case in queries:
+        by_language.setdefault(case["language"], []).append(case)
+    for language, subset in sorted(by_language.items()):
+        sub = evaluate(store, subset, k=5)
+        print(f"  {language}: recall@5={sub['recall_at_k']:.2%}  (n={sub['n']})")
+
+    if result["misses"]:
+        print(f"\n{len(result['misses'])} misses:")
+        for miss in result["misses"]:
+            print(f"  [{miss['language']}] {miss['query']}")
+```
+
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `pytest backend/tests/test_evaluate.py -v`
+Expected: PASS (4 tests)
+
+- [ ] **Step 6: Run the real evaluation and record the result**
+
+Run: `python -m backend.rag.evaluate`
+Expected: a per-language breakdown. **Write the output into `docs/interview-defense.md` §12 (Measurement checklist).** The per-language split is the interesting part — if Hindi and Marathi recall drops sharply against English, that is a finding worth being able to explain, not a failure to hide.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add backend/rag/evaluate.py backend/rag/eval_queries.json backend/tests/test_evaluate.py
+git commit -m "feat: add recall@5 and MRR retrieval evaluation across three languages"
+```
+
+---
+
 ## Phase 1 done when
 
-`pytest backend/tests/test_generate_catalog.py backend/tests/test_rag_store.py -v` passes and the manual query in Task 1.3 returns sensible results, including for a Hindi query.
+`pytest backend/tests/test_generate_catalog.py backend/tests/test_rag_store.py backend/tests/test_evaluate.py -v` passes, the manual query in Task 1.3 returns sensible results including for a Hindi query, and `python -m backend.rag.evaluate` prints a recorded recall@5 figure per language.

@@ -27,15 +27,25 @@ The WebSocket wire protocol defined in Phase 5. Endpoint: `/ws/{session_id}`.
 **Server → client, per turn, in order:**
 1. Text `{"type": "transcript", "text": str, "language": str}`
 2. Repeating per clause: text `{"type": "answer_text", "text": str}`, then a binary WAV frame for that clause.
-3. Text `{"type": "turn_end"}`
+3. Text `{"type": "timing", "stages": {...}}`
+4. Text `{"type": "turn_end"}`
+
+**Out of band:** text `{"type": "interrupted"}` — barge-in fired; stop playback and discard queued audio. No `turn_end` follows it.
+
+## Two browser constraints that will bite if ignored
+
+**1. The mic requires a secure context.** `getUserMedia` is unavailable on plain `http://` origins — `localhost` is exempt, but `http://192.168.x.x` on a phone is not. It fails without a useful error. **The frontend must be served over HTTPS for any mobile testing**, which means a second ngrok tunnel (or any static host: Netlify, GitHub Pages, Vercel).
+
+**2. iOS ignores requested sample rates.** `new AudioContext({sampleRate: 16000})` is honoured on desktop Chrome but Safari/iOS runs its hardware rate (usually 44.1 or 48kHz) and either ignores the hint or throws. Audio then arrives at the server at the wrong rate, and both webrtcvad and Whisper produce silent nonsense rather than an error. **Always read `audioContext.sampleRate` and downsample explicitly.**
 
 ## Global Constraints
 
 - The ngrok URL is not stable across Colab restarts — the backend URL must be user-supplied at runtime, never hardcoded. *(spec: Frontend)*
-- Must work on mobile browsers as well as desktop. *(spec: Frontend)*
+- Must work on mobile browsers as well as desktop, which requires HTTPS. *(spec: Frontend)*
 - UI shows mic state, live transcript, connection status and the detected language. *(spec: Frontend)*
 - On WebSocket close, show a disconnected state the user can retry from. *(spec: Error handling)*
-- Audio sent must be 16kHz mono 16-bit PCM to match what the backend's VAD and Whisper expect. *(spec: Data flow step 1)*
+- Audio sent must be 16kHz mono 16-bit PCM regardless of the device's native rate. *(spec: Data flow step 1)*
+- Barge-in must stop playback immediately, including audio already queued. *(spec: Data flow step 8)*
 
 ---
 
@@ -98,6 +108,11 @@ async def ws_endpoint(websocket: WebSocket, session_id: str):
             await websocket.send_bytes(_fake_wav_bytes())
             await asyncio.sleep(0.2)
 
+        await websocket.send_text(json.dumps({"type": "timing", "stages": {
+            "stt": 1800.0, "retrieval": 25.0, "llm_first_token": 900.0,
+            "llm_total": 2100.0, "tts_total": 1200.0, "time_to_first_audio": 3100.0,
+            "turn_total": 4300.0,
+        }}))
         await websocket.send_text(json.dumps({"type": "turn_end"}))
 
 
@@ -154,6 +169,7 @@ git commit -m "feat: add mock WebSocket server for frontend-only development"
       Status: <span id="status">disconnected</span>
       &middot; Language: <span id="language">—</span>
     </p>
+    <p class="timing-row" id="timing"></p>
 
     <button id="mic-btn" disabled>Hold to talk</button>
 
@@ -168,14 +184,24 @@ git commit -m "feat: add mock WebSocket server for frontend-only development"
 
 ```javascript
 // frontend/app.js
+const TARGET_RATE = 16000;
+
 let ws = null;
-let audioContext = null;
+let captureContext = null;
 let mediaStream = null;
 let processor = null;
 let playbackContext = null;
 
+// Playback queue state. Clauses arrive faster than they play, so each buffer is
+// scheduled to start when the previous one ends instead of immediately —
+// otherwise overlapping clauses play on top of each other.
+let nextPlayTime = 0;
+let scheduledSources = [];
+let decodeChain = Promise.resolve();
+
 const statusEl = document.getElementById("status");
 const languageEl = document.getElementById("language");
+const timingEl = document.getElementById("timing");
 const logEl = document.getElementById("transcript-log");
 const micBtn = document.getElementById("mic-btn");
 const connectBtn = document.getElementById("connect-btn");
@@ -212,58 +238,135 @@ connectBtn.addEventListener("click", () => {
   };
 
   ws.onmessage = (event) => {
-    if (typeof event.data === "string") {
-      const msg = JSON.parse(event.data);
-      if (msg.type === "transcript") {
-        log("you", msg.text);
-        languageEl.textContent = msg.language;
-      } else if (msg.type === "answer_text") {
-        log("agent", msg.text);
-      } else if (msg.type === "turn_end") {
-        statusEl.textContent = "connected";
-      }
-    } else {
-      playAudio(event.data);
+    if (typeof event.data !== "string") {
+      queueAudio(event.data);
+      return;
+    }
+    const msg = JSON.parse(event.data);
+    if (msg.type === "transcript") {
+      log("you", msg.text);
+      languageEl.textContent = msg.language;
+    } else if (msg.type === "answer_text") {
+      log("agent", msg.text);
+    } else if (msg.type === "interrupted") {
+      stopPlayback();
+      log("system", "interrupted");
+      statusEl.textContent = "listening";
+    } else if (msg.type === "timing") {
+      showTiming(msg.stages);
+    } else if (msg.type === "turn_end") {
+      statusEl.textContent = "connected";
     }
   };
 });
 
-function playAudio(arrayBuffer) {
+function showTiming(stages) {
+  const parts = Object.entries(stages).map(([k, v]) => `${k} ${v}ms`);
+  timingEl.textContent = parts.join(" · ");
+}
+
+// ---------- playback ----------
+
+function ensurePlaybackContext() {
   if (!playbackContext) {
     playbackContext = new (window.AudioContext || window.webkitAudioContext)();
   }
-  playbackContext.decodeAudioData(arrayBuffer.slice(0), (buffer) => {
-    const source = playbackContext.createBufferSource();
-    source.buffer = buffer;
-    source.connect(playbackContext.destination);
-    source.start();
+  // iOS suspends audio contexts until a user gesture resumes them.
+  if (playbackContext.state === "suspended") playbackContext.resume();
+  return playbackContext;
+}
+
+function queueAudio(arrayBuffer) {
+  const ctx = ensurePlaybackContext();
+  // Chain the decodes so clauses cannot be scheduled out of order when a later,
+  // shorter clip finishes decoding first.
+  decodeChain = decodeChain
+    .then(() => ctx.decodeAudioData(arrayBuffer.slice(0)))
+    .then((buffer) => {
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      const startAt = Math.max(ctx.currentTime, nextPlayTime);
+      source.start(startAt);
+      nextPlayTime = startAt + buffer.duration;
+      scheduledSources.push(source);
+      source.onended = () => {
+        scheduledSources = scheduledSources.filter((s) => s !== source);
+      };
+    })
+    .catch(() => {});
+}
+
+function stopPlayback() {
+  scheduledSources.forEach((source) => {
+    try {
+      source.stop();
+    } catch (e) {
+      /* already stopped */
+    }
   });
+  scheduledSources = [];
+  nextPlayTime = 0;
+  decodeChain = Promise.resolve();
+}
+
+// ---------- capture ----------
+
+// Box-filter downsample. The device rate is whatever the hardware gives us
+// (typically 44100 or 48000); the backend requires exactly 16000.
+function downsample(input, inputRate) {
+  if (inputRate === TARGET_RATE) return input;
+  const ratio = inputRate / TARGET_RATE;
+  const outLength = Math.floor(input.length / ratio);
+  const out = new Float32Array(outLength);
+  for (let i = 0; i < outLength; i++) {
+    const start = Math.floor(i * ratio);
+    const end = Math.min(Math.floor((i + 1) * ratio), input.length);
+    let sum = 0;
+    for (let j = start; j < end; j++) sum += input[j];
+    out[i] = end > start ? sum / (end - start) : 0;
+  }
+  return out;
+}
+
+function floatToPcm16(input) {
+  const pcm16 = new Int16Array(input.length);
+  for (let i = 0; i < input.length; i++) {
+    const clamped = Math.max(-1, Math.min(1, input[i]));
+    pcm16[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+  }
+  return pcm16;
 }
 
 async function startMic(event) {
   event.preventDefault();
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (processor) return; // already capturing
 
+  ensurePlaybackContext(); // unlock audio output on the same user gesture
   statusEl.textContent = "listening";
+
   mediaStream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, sampleRate: 16000 },
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
   });
-  audioContext = new AudioContext({ sampleRate: 16000 });
-  const source = audioContext.createMediaStreamSource(mediaStream);
-  processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+  // Do NOT request a sample rate here — iOS ignores it. Use whatever the
+  // hardware provides and downsample in software.
+  captureContext = new (window.AudioContext || window.webkitAudioContext)();
+  const deviceRate = captureContext.sampleRate;
+
+  const source = captureContext.createMediaStreamSource(mediaStream);
+  processor = captureContext.createScriptProcessor(4096, 1, 1);
 
   processor.onaudioprocess = (e) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const input = e.inputBuffer.getChannelData(0);
-    const pcm16 = new Int16Array(input.length);
-    for (let i = 0; i < input.length; i++) {
-      pcm16[i] = Math.max(-32768, Math.min(32767, input[i] * 32768));
-    }
-    ws.send(pcm16.buffer);
+    const resampled = downsample(input, deviceRate);
+    ws.send(floatToPcm16(resampled).buffer);
   };
 
   source.connect(processor);
-  processor.connect(audioContext.destination);
+  processor.connect(captureContext.destination);
 }
 
 function stopMic(event) {
@@ -272,9 +375,9 @@ function stopMic(event) {
     processor.disconnect();
     processor = null;
   }
-  if (audioContext) {
-    audioContext.close();
-    audioContext = null;
+  if (captureContext) {
+    captureContext.close();
+    captureContext = null;
   }
   if (mediaStream) {
     mediaStream.getTracks().forEach((t) => t.stop());
@@ -291,6 +394,8 @@ micBtn.addEventListener("touchstart", startMic);
 micBtn.addEventListener("mouseup", stopMic);
 micBtn.addEventListener("touchend", stopMic);
 ```
+
+> **Note on `createScriptProcessor`:** it is deprecated in favour of `AudioWorklet`, which runs on a dedicated audio thread and does not risk glitching when the main thread is busy. It still works in every current browser and is far less code, which is the right trade for a demo — but it is a legitimate thing to be asked about, so know the answer: *"ScriptProcessor runs on the main thread and is deprecated; AudioWorklet is the correct production choice."*
 
 - [ ] **Step 3: Write the styling**
 
@@ -329,6 +434,20 @@ button {
   color: #475569;
 }
 
+.timing-row {
+  font-size: 11px;
+  color: #64748b;
+  font-family: ui-monospace, monospace;
+  min-height: 14px;
+  word-break: break-word;
+}
+
+.line-system {
+  color: #b45309;
+  font-style: italic;
+  font-size: 13px;
+}
+
 #mic-btn {
   background: #2563eb;
   color: #fff;
@@ -362,24 +481,52 @@ button {
 }
 ```
 
-- [ ] **Step 4: Manual test against the mock server**
+- [ ] **Step 4: Desktop test against the mock server**
 
 In one terminal: `python -m frontend.mock_server`
 In another: `python -m http.server 5500 --directory frontend`
 
-Open `http://localhost:5500/index.html` on desktop, and `http://<your-lan-ip>:5500/index.html` on a phone on the same network. Enter `ws://<your-lan-ip>:8001/ws/session1`, press Connect, hold the mic button, speak, release.
+Open `http://localhost:5500/index.html` — `localhost` is a secure context, so the mic works here without HTTPS. Enter `ws://localhost:8001/ws/session1`, press Connect, hold the mic button, speak, release.
 
-Expected on both devices: status moves connecting → connected → listening → thinking → connected; the canned transcript and two answer clauses appear in the log; language shows `en`; a short tone plays for each clause.
+Expected: status moves connecting → connected → listening → thinking → connected; the canned transcript and two answer clauses appear; language shows `en`; two tones play **one after the other, not on top of each other**; the timing row stays empty (the mock sends no timing message).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Mobile test — requires HTTPS on both ends**
+
+`http://<lan-ip>:5500` **will not work** — the mic is blocked on insecure origins with no clear error. Tunnel both the page and the mock server:
+
+```bash
+# terminal 1
+python -m frontend.mock_server
+# terminal 2
+python -m http.server 5500 --directory frontend
+# terminal 3 — two tunnels
+ngrok http 5500    # serves the page over https
+ngrok http 8001    # serves the mock server over wss
+```
+
+Open the `https://` page URL on a phone, paste the mock server's `wss://` URL into the backend field, and repeat the Step 4 interaction.
+
+Expected: identical behaviour to desktop. If the mic button does nothing, check the browser console for a secure-context error before debugging anything else.
+
+- [ ] **Step 6: Verify the audio is genuinely 16kHz**
+
+Phones rarely run at 16kHz natively, so confirm the downsampling works rather than assuming it. Add a temporary log in `startMic`:
+
+```javascript
+console.log("device rate", deviceRate, "-> sending", TARGET_RATE);
+```
+
+Expected on a phone: something like `device rate 48000 -> sending 16000`. If the device rate reads 16000 on a phone, be suspicious — verify the downsample path is actually running.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add frontend/index.html frontend/app.js frontend/style.css
-git commit -m "feat: add mobile-responsive web voice UI"
+git commit -m "feat: add mobile-responsive web voice UI with queued playback"
 ```
 
 ---
 
 ## Phase 6 done when
 
-The Step 4 manual test passes on both a desktop and a real mobile browser, against the mock server, with no real backend involved.
+Steps 4–6 pass on both a desktop browser and a real mobile browser over HTTPS, against the mock server, with no real backend involved — including clauses playing sequentially rather than overlapping, and a confirmed downsample from the device's native rate to 16kHz.

@@ -10,11 +10,11 @@ Each phase below is a **separate plan document**, executable and testable on its
 
 | Phase | Document | Builds | Needs a GPU? | Depends on |
 |---|---|---|---|---|
-| 1 | [phase-1-rag.md](phase-1-rag.md) | Synthetic catalog + Chroma retrieval module | No | nothing |
+| 1 | [phase-1-rag.md](phase-1-rag.md) | Synthetic catalog + Chroma retrieval + recall@5 evaluation | No | nothing |
 | 2 | [phase-2-llm.md](phase-2-llm.md) | Prompt builder + llama.cpp streaming generation | Only for the manual test | nothing |
-| 3 | [phase-3-stt.md](phase-3-stt.md) | faster-whisper transcription + VAD segmenter | No | nothing |
+| 3 | [phase-3-stt.md](phase-3-stt.md) | faster-whisper transcription + VAD segmenter + device benchmark | Only for the benchmark | nothing |
 | 4 | [phase-4-tts.md](phase-4-tts.md) | MMS-TTS synthesis + clause chunker | No | nothing |
-| 5 | [phase-5-backend.md](phase-5-backend.md) | SQLite history + FastAPI WebSocket orchestration | Only for the real wiring script | Contracts of 1-4 (fakes in tests) |
+| 5 | [phase-5-backend.md](phase-5-backend.md) | SQLite history + FastAPI WebSocket orchestration + barge-in + timing | Only for the real wiring script | Contracts of 1-4 (fakes in tests) |
 | 6 | [phase-6-frontend.md](phase-6-frontend.md) | Mock server + web/mWeb voice UI | No | WebSocket protocol contract only |
 | 7 | [phase-7-integration.md](phase-7-integration.md) | Colab + ngrok startup, end-to-end manual test | Yes | Phases 5 and 6 running |
 
@@ -29,11 +29,13 @@ Changing anything in this table means updating the consuming phase's document to
 | Catalog item dict: `{"id": str, "name": str, "description": str, "price": float, "stock": int, "category": str}` | Phase 1 | Phase 1 (store), Phase 2 (prompt) |
 | Retrieved item dict: catalog item + `{"score": float}` | Phase 1 | Phase 2, Phase 5 |
 | `InventoryStore.query(text: str, top_k: int = 5) -> list[dict]` | Phase 1 | Phase 5 |
-| `build_prompt(user_text, retrieved, history, max_history_turns=6) -> str` | Phase 2 | Phase 5 |
+| `build_prompt(user_text, retrieved, history, language="en", max_history_turns=6) -> str` | Phase 2 | Phase 5 |
 | `LLMEngine.generate(prompt, stop=None, max_tokens=200) -> Iterator[str]` | Phase 2 | Phase 5 |
 | History turn dict: `{"role": "user"\|"assistant", "text": str}` | Phase 5 | Phase 2 (prompt input) |
+| `Transcriber(model_size="small", device="cpu", compute_type=None)` | Phase 3 | Phase 5 |
 | `Transcriber.transcribe(audio_path: str) -> {"text": str, "language": str}` | Phase 3 | Phase 5 |
 | `UtteranceSegmenter.push(pcm_chunk: bytes) -> bytes \| None` | Phase 3 | Phase 5 |
+| `UtteranceSegmenter.speech_active -> bool` (rising edge drives barge-in) | Phase 3 | Phase 5 |
 | `Synthesizer.synthesize(text: str, language: str = "en") -> bytes` (WAV) | Phase 4 | Phase 5 |
 | `ClauseChunker.push(fragment) -> list[str]` / `.flush() -> str \| None` | Phase 4 | Phase 5 |
 | **WebSocket wire protocol** (see below) | Phase 5 | Phase 6 |
@@ -43,13 +45,33 @@ Changing anything in this table means updating the consuming phase's document to
 The single contract between backend and frontend. Endpoint: `/ws/{session_id}`.
 
 **Client → server:**
-- Binary frames: raw 16kHz mono PCM chunks.
+- Binary frames: raw 16kHz mono PCM chunks (downsampled client-side from the device's native rate).
 - Text frame `"__end__"`: force end-of-turn (used by push-to-talk release and by tests, instead of waiting for VAD silence).
 
 **Server → client, in order, per turn:**
 1. Text: `{"type": "transcript", "text": str, "language": str}`
 2. Then, repeating per clause: text `{"type": "answer_text", "text": str}` followed by a binary WAV frame for that clause.
-3. Text: `{"type": "turn_end"}`
+3. Text: `{"type": "timing", "stages": {...}}` — per-stage milliseconds for the turn.
+4. Text: `{"type": "turn_end"}`
+
+**Out of band, at any point during a turn:**
+- Text: `{"type": "interrupted"}` — the caller spoke over the agent and generation was cancelled. The client stops playback and discards queued audio. No `turn_end` follows.
+
+### The language code is used twice
+
+Whisper detects it once (Phase 3) and it feeds **both** `build_prompt` (so the model answers in that language) **and** `Synthesizer.synthesize` (so the matching voice speaks it). Wiring only one of the two produces an English answer spoken by an Indic voice — unintelligible audio, and the most likely way the multilingual feature fails.
+
+## Traps — read before writing code
+
+Five failure modes found in review that are silent, misleading, or both. Each is handled in its phase document; they are listed together here because the cost of hitting one blind is hours.
+
+| Trap | Symptom | Phase |
+|---|---|---|
+| `pip install llama-cpp-python` ships a **CPU-only** build | Installs fine, accepts `n_gpu_layers=-1`, then runs at 1-3 tok/s with no error. Needs `CMAKE_ARGS="-DGGML_CUDA=on"` | 2, 7 |
+| `getUserMedia` needs a **secure context** | Mic silently unavailable on `http://<lan-ip>` from a phone. The page must be served over HTTPS | 6, 7 |
+| The prompt must **name the reply language** | Hindi question gets an English answer, spoken by a Hindi voice — unintelligible. Language must reach `build_prompt`, not just the TTS | 2, 5 |
+| iOS **ignores** `AudioContext({sampleRate})` | Audio arrives at 44.1/48kHz; VAD and Whisper both produce nonsense rather than an error. Downsample in software | 6 |
+| A low-variety catalog makes **retrieval look broken** | Top-5 comes back as near-identical rows no embedding can rank. Every generated item needs a distinct name and description | 1 |
 
 ## Global constraints (apply to every phase)
 
