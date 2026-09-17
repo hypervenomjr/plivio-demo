@@ -79,6 +79,23 @@ three ways.
 - Synthetic catalog, ~1000+ items (name, price, description, stock, etc),
   generated for this build — no real business data.
 - Embedded once at startup into Chroma.
+- Chroma runs in-notebook (embedded, not a separate server), persists to
+  local Colab disk. Same tradeoff as conversation history: wiped on
+  runtime reset. Acceptable — catalog is seeded/re-embedded fresh on
+  every notebook boot, not meant to survive across sessions.
+
+## Frontend (web/mWeb UI)
+
+- Single-page web app (desktop + mobile browser), served separately from
+  the Colab backend — static HTML/JS, connects to the Colab+ngrok
+  WebSocket URL.
+- Mic capture (getUserMedia), streams PCM chunks over WebSocket,
+  receives + plays back streamed TTS audio.
+- Minimal UI: mic on/off state, live transcript display, connection
+  status, language indicator (once detected).
+- ngrok URL changes each time the Colab notebook restarts (free tier) —
+  UI needs a way to point at the current tunnel URL (config field or
+  query param), not hardcoded.
 
 ## Error handling
 
