@@ -389,6 +389,9 @@ That is a materially stronger answer than either placement argued in the abstrac
 
 ### 7.2 Barge-in works, but generation is not truly async
 
+**Measured:** in a driven test (VAD signals speech mid-generation, 20ms per simulated token), the `interrupted` message reached the client **~38ms** after the rising edge — 8 clauses had already played before cancellation landed. That is the actual latency of `asyncio.Task.cancel()` plus one socket round-trip; it is fast enough that a caller would perceive the agent as stopping essentially immediately.
+
+
 Barge-in is implemented: the turn runs as a cancellable `asyncio.Task`, the receive loop keeps reading during generation, and the rising edge of VAD speech cancels the in-flight answer and tells the client to flush queued audio.
 
 **The honest caveat:** `llm_engine.generate` is a *synchronous* generator, so the event loop only regains control at the explicit `await asyncio.sleep(0)` between fragments. That is enough for barge-in to fire within a token or two, but it isn't genuinely concurrent — a long synchronous call inside the loop would still block it. The correct version runs generation in a thread executor. Know this distinction; it's a natural follow-up question.
