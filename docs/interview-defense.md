@@ -525,7 +525,31 @@ Run these once the build is working and fill in the table. **Each measured numbe
 - [ ] **Recall@5** over a labeled query set, if §7.3 gets built.
 - [ ] **Verify cloud pricing** for every rate quoted in §4.2 on the vendor's own pricing page.
 
-### Record measurements here
+### Measured so far
+
+**Retrieval quality** — `python -m backend.rag.evaluate`, 30 labeled queries, Chroma over 1,200 items, `multilingual-e5-small` on CPU:
+
+| Language | recall@5 | MRR | n |
+|---|---|---|---|
+| English | **100%** | 1.000 | 10 |
+| Hindi | **100%** | 1.000 | 10 |
+| Marathi | **90%** | 0.900 | 10 |
+| **Overall** | **96.7%** | 0.967 | 30 |
+
+MRR equals recall in every split, meaning **every hit landed at rank 1** — the correct product type was the top result, not merely somewhere in the top five.
+
+The single miss is Marathi *"मला कीबोर्ड घ्यायचा आहे"* (I want to buy a keyboard), which retrieved a dot-grid **notebook** instead of a mechanical **keyboard**. Worth being able to explain: Marathi is the thinnest-resourced of the three languages in e5's training data, and "notebook" and "keyboard" are semantically adjacent (both computer/stationery), so a weaker cross-lingual alignment collapses them. This is the predicted failure mode showing up exactly where predicted, not a surprise.
+
+**Two honesty notes about this measurement**, worth volunteering if pressed:
+
+1. **Judgment design.** The catalog carries ~14 brands of each product+variant, so scoring a generic query against one exact UUID would cap recall@5 near 5/14 regardless of retrieval quality — it would measure catalog structure, not the retriever. So generic queries are judged on product type or category, and only brand-specific queries ("the Juniper cordless blender") are judged on exact ID.
+2. **Sample size.** 30 queries, 10 per language. Directional, not tight. A 90% on ten Marathi queries means "one miss," and the confidence interval on that is wide.
+
+**Catalog embedding cost:** 1,200 items embedded in **22 seconds** on CPU — the one-time startup cost, paid per notebook boot.
+
+**Known retrieval limitation found while testing:** "cheap sneakers" returns a $159 shoe. Vector similarity matches *"sneakers"* and has no notion of *"cheap"* — price and stock constraints need metadata filtering (Chroma `where` clauses), not embeddings. Worth naming before they ask: **semantic similarity is not query understanding.**
+
+### Still to record
 
 | Metric | Estimated | **Measured** | Conditions |
 |---|---|---|---|
