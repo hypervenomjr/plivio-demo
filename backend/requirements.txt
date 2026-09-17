@@ -2,6 +2,12 @@ chromadb==0.5.5
 sentence-transformers==3.0.1
 faster-whisper==1.0.3
 scipy==1.14.0
+webrtcvad==2.0.10
+
+# webrtcvad 2.0.10 imports pkg_resources at module load. setuptools 81
+# deprecated it and 84 removed it, so a current setuptools breaks webrtcvad
+# with ModuleNotFoundError: No module named 'pkg_resources'.
+setuptools<81
 
 # torch is deliberately NOT pinned: Colab ships a build matched to its CUDA
 # runtime, and forcing a specific version either takes ten minutes to install

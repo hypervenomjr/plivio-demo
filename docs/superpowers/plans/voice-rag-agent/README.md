@@ -34,8 +34,9 @@ Changing anything in this table means updating the consuming phase's document to
 | History turn dict: `{"role": "user"\|"assistant", "text": str}` | Phase 5 | Phase 2 (prompt input) |
 | `Transcriber(model_size="small", device="cpu", compute_type=None)` | Phase 3 | Phase 5 |
 | `Transcriber.transcribe(audio_path: str) -> {"text": str, "language": str}` | Phase 3 | Phase 5 |
-| `UtteranceSegmenter.push(pcm_chunk: bytes) -> bytes \| None` | Phase 3 | Phase 5 |
+| `UtteranceSegmenter.push(pcm_chunk: bytes) -> bytes \| None` — accepts **any** chunk length, re-frames internally | Phase 3 | Phase 5 |
 | `UtteranceSegmenter.speech_active -> bool` (rising edge drives barge-in) | Phase 3 | Phase 5 |
+| `Transcriber.transcribe` returns a language **clamped to `en`/`hi`/`mr`** | Phase 3 | Phase 4, Phase 5 |
 | `Synthesizer.synthesize(text: str, language: str = "en") -> bytes` (WAV) | Phase 4 | Phase 5 |
 | `ClauseChunker.push(fragment) -> list[str]` / `.flush() -> str \| None` | Phase 4 | Phase 5 |
 | **WebSocket wire protocol** (see below) | Phase 5 | Phase 6 |
@@ -72,6 +73,15 @@ Five failure modes found in review that are silent, misleading, or both. Each is
 | The prompt must **name the reply language** | Hindi question gets an English answer, spoken by a Hindi voice — unintelligible. Language must reach `build_prompt`, not just the TTS | 2, 5 |
 | iOS **ignores** `AudioContext({sampleRate})` | Audio arrives at 44.1/48kHz; VAD and Whisper both produce nonsense rather than an error. Downsample in software | 6 |
 | A low-variety catalog makes **retrieval look broken** | Top-5 comes back as near-identical rows no embedding can rank. Every generated item needs a distinct name and description | 1 |
+
+Four more found while building:
+
+| Trap | Symptom | Phase |
+|---|---|---|
+| **Whisper hallucinates on non-speech** | Silence transcribes as "you"; noise produced a Korean news sign-off and a Spanish word. A cough tripping VAD becomes a spurious LLM turn, and a bogus language code raises in TTS mid-turn. Needs `vad_filter`, no-speech filtering, and a language clamp | 3 |
+| faster-whisper 1.0.3 **raises on fully-filtered audio** | `ValueError: max() arg is an empty sequence` instead of an empty result | 3 |
+| **webrtcvad needs `setuptools<81`** | Imports `pkg_resources`, removed in setuptools 84: `ModuleNotFoundError` | 3 |
+| **webrtcvad frames vs browser chunks** | webrtcvad accepts only 10/20/30ms frames; a browser sends whatever its buffer works out to. The segmenter re-frames internally so callers can push any length | 3, 5 |
 
 ## Global constraints (apply to every phase)
 
