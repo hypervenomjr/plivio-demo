@@ -74,6 +74,40 @@ three ways.
 - Included in the LLM prompt each turn, windowed to the last N turns /
   a token budget to avoid overflowing the model's context.
 
+## RAG & inference details
+
+- **Chunking:** one chunk per inventory item — no sliding-window text
+  splitting. Each item's fields (name, description, price, stock)
+  concatenated into a single chunk, item id kept as metadata. Structured
+  short records don't benefit from further splitting.
+- **Embedding model:** `intfloat/multilingual-e5-small` (CPU, ~118M
+  params). Must be multilingual, not plain English MiniLM, since queries
+  can arrive in Hindi/Marathi and still need to match English-described
+  inventory. Computed once per item at catalog load (cached in Chroma)
+  and once per live user query at runtime.
+- **LLM inference:** llama.cpp (via llama-cpp-python) serving the GGUF
+  Q4_K_M quant of Qwen2.5-7B-Instruct. Chosen over vLLM — single
+  concurrent caller in this prototype, so vLLM's batching/throughput
+  advantage doesn't apply; llama.cpp has lower setup overhead on Colab
+  and native token-streaming.
+
+## Cost / token optimization
+
+1. 4-bit quant on the LLM — largest single lever, ~4x memory/compute cut
+   vs fp16.
+2. RAG retrieval capped to top-k=3-5 listings per turn, not the whole
+   catalog.
+3. Retrieved listings truncated to essential fields in the prompt (name,
+   price, stock, short description) — not the full raw record.
+4. Conversation history windowed to last N turns / a fixed token budget
+   (see above), oldest turns dropped first.
+5. Short, fixed system prompt — no verbose re-stated instructions per
+   turn.
+6. Stop sequences on LLM generation so it halts at the actual answer
+   instead of over-generating.
+7. Embeddings cached at catalog load; never recomputed except for the
+   live user query.
+
 ## Inventory data
 
 - Synthetic catalog, ~1000+ items (name, price, description, stock, etc),
